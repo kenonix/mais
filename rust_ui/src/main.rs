@@ -356,6 +356,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut stream = response.bytes_stream();
             let mut full_response_content = String::new();
             let mut tool_calls: Option<Value> = None;
+            let mut line_buffer = String::new();
 
             while let Some(chunk_res) = stream.next().await {
                 let chunk = match chunk_res {
@@ -366,10 +367,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let chunk_str = String::from_utf8_lossy(&chunk);
-                for line in chunk_str.lines() {
-                    if line.trim().is_empty() { continue; }
-                    if let Ok(j) = serde_json::from_str::<Value>(line) {
+                let chunk_str_dbg = String::from_utf8_lossy(&chunk);
+                // eprintln!("[DEBUG CHUNK] {}", chunk_str_dbg);
+
+                line_buffer.push_str(&chunk_str_dbg);
+                while let Some(pos) = line_buffer.find('\n') {
+                    let line = line_buffer[..pos].trim().to_string();
+                    line_buffer.drain(..=pos);
+                    
+                    if line.is_empty() { continue; }
+                    if let Ok(j) = serde_json::from_str::<Value>(&line) {
                         if let Some(msg) = j.get("message") {
                             // 도구 호출 감지
                             if let Some(calls) = msg.get("tool_calls") {

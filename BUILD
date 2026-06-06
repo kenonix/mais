@@ -17,3 +17,11 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "libLiteRtLmC.so",
+    linkshared = True,
+    deps = [
+        "@litert_lm//c:engine",
+    ],
+)
+
