@@ -1,0 +1,50 @@
+{
+    "list_large_files": {
+        "type": "function",
+        "function": {
+            "name": "list_large_files",
+            "description": "",
+            "parameters": {
+                "properties": {
+                    "min_size_kb": {
+                        "description": "검색할 최소 파일 크기 (KB 단위)",
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "min_size_kb"
+                ]
+            }
+        }
+    },
+    "google_news_search": {
+        "type": "function",
+        "function": {
+            "name": "google_news_search",
+            "description": "",
+            "parameters": {
+                "properties": {
+                    "language": {
+                        "description": "언어 코드 (예: en, ko)",
+                        "type": "STRING"
+                    },
+                    "query": {
+                        "description": "검색할 키워드 (예: Palestine War)",
+                        "type": "STRING"
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            }
+        }
+    },
+    "list_current_directory_files": {
+        "type": "function",
+        "function": {
+            "name": "list_current_directory_files",
+            "description": "",
+            "parameters": {}
+        }
+    }
+}

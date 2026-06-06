@@ -1,0 +1,39 @@
+# Editor directories
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Bazel build outputs (symlinks)
+bazel-bin
+bazel-cpp
+bazel-out
+bazel-testlogs
+
+# Bazelisk binary
+bazelisk
+
+# CMake build directory
+build/
+
+# Rust / Cargo build artifacts
+**/target/
+
+# Log files
+*.log
+debug.log
+
+# Local user config and state
+<<<<<<< HEAD
+.env
+=======
+>>>>>>> d369123 (여러가지 추가)
+config.json
+system_prompt.txt
+cmake
+test_openai.py
+test_ollama.py
+
