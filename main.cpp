@@ -31,7 +31,8 @@ const std::string CONFIG_FILE = "config.json";
 
 const std::string DEFAULT_SOUL = R"(당신의 이름은 AI입니다.
 한국어만 사용하며, 친절하고 명확하게 답변합니다.
-수학적 그래프 시각화가 필요할 경우 반드시 ```latex 수식 ``` 블록을 사용하세요.)";
+사용자에게 보이는 답변은 자연스러운 평문을 우선합니다.
+수학적 그래프 시각화가 필요할 경우 수식을 평문으로 설명하고, 필요한 경우 그래프 도구를 사용하세요.)";
 
 /// soul.txt + tools.txt를 합산하여 하나의 시스템 프롬프트로 반환
 static std::string load_system_prompt() {
@@ -64,7 +65,7 @@ struct ChatConfig {
   float temperature = 0.7f;
   float top_p = 0.95f;
   int top_k = 40;
-  int max_tokens = 2048;
+  int max_tokens = 262144;
 
   json to_json() const {
     return {
@@ -414,10 +415,10 @@ public:
       system_prompt_ = load_system_prompt();
     }
     std::cout << "[시스템] 로드된 시스템 프롬프트:\n" << system_prompt_ << "\n" << std::endl;
-    std::cout << "[시스템] 모델 로딩 중..." << std::endl;
+    std::cout << "[시스템] 모델 로딩 중... (GPU: " << (use_gpu ? "true" : "false") << ")" << std::endl;
     const char* backend = use_gpu ? "gpu" : "cpu";
     LiteRtLmEngineSettings *settings = litert_lm_engine_settings_create(
-        model_path.c_str(), backend, "cpu", "cpu");
+        model_path.c_str(), backend, backend, backend);
     if (!settings)
       throw std::runtime_error("엔진 설정 생성 실패");
     engine_ = litert_lm_engine_create(settings);
@@ -549,6 +550,24 @@ public:
                   func_args = call["function"]["arguments"].dump();
                 }
               }
+            }
+
+            if (func_name == "create_or_update_tool") {
+              std::string tool_name = "알 수 없음";
+              std::string tool_desc = "설명 없음";
+              try {
+                auto args_val = json::parse(func_args);
+                if (args_val.contains("name") && args_val["name"].is_string()) {
+                  tool_name = args_val["name"].get<std::string>();
+                }
+                if (args_val.contains("description") && args_val["description"].is_string() &&
+                    !args_val["description"].get<std::string>().empty()) {
+                  tool_desc = args_val["description"].get<std::string>();
+                }
+              } catch (...) {}
+              tool_outputs.push_back({"__guidance", "도구를 만듭니다. 이름: " + tool_name + ". 목적: " + tool_desc + "\n"});
+            } else {
+              tool_outputs.push_back({"__guidance", "도구를 사용합니다. 이름: " + func_name + "\n"});
             }
 
             std::string tool_result = ExecuteTool(func_name, func_args);
@@ -808,6 +827,24 @@ public:
               }
             }
 
+            if (func_name == "create_or_update_tool") {
+              std::string tool_name = "알 수 없음";
+              std::string tool_desc = "설명 없음";
+              try {
+                auto args_val = json::parse(func_args);
+                if (args_val.contains("name") && args_val["name"].is_string()) {
+                  tool_name = args_val["name"].get<std::string>();
+                }
+                if (args_val.contains("description") && args_val["description"].is_string() &&
+                    !args_val["description"].get<std::string>().empty()) {
+                  tool_desc = args_val["description"].get<std::string>();
+                }
+              } catch (...) {}
+              chunk_cb("\n도구를 만듭니다. 이름: " + tool_name + ". 목적: " + tool_desc + "\n");
+            } else {
+              chunk_cb("\n도구를 사용합니다. 이름: " + func_name + "\n");
+            }
+
             std::string tool_result = ExecuteTool(func_name, func_args);
 
             // 도구 실패 시 자동 재시도 지시 주입
@@ -958,7 +995,7 @@ void RunServer(MultimodalCliApp &app, int port, const std::string &served_model_
 
       // 생성 옵션 매핑 (Ollama 및 OpenAI 규격 매칭)
       json opt = {
-        {"max_output_tokens", 2048},
+        {"max_output_tokens", 262144},
         {"temperature", 0.7},
         {"top_p", 0.95},
         {"top_k", 40}

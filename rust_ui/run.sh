@@ -1,5 +1,4 @@
 #!/bin/bash
-# 혜연 AI 채팅 클라이언트 실행 스크립트
 # 사용법: ./run.sh [--port PORT] [--host HOST]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

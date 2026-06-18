@@ -7,6 +7,7 @@ cc_binary(
     ],
     data = select({
         "@platforms//os:linux": [
+            "@litert_lm//prebuilt/linux_x86_64:libLiteRtTopKWebGpuSampler.so",
             "@litert_lm//prebuilt/linux_x86_64:libLiteRtWebGpuAccelerator.so",
         ],
         "//conditions:default": [],
@@ -24,4 +25,3 @@ cc_binary(
         "@litert_lm//c:engine",
     ],
 )
-

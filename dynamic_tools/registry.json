@@ -1,50 +1,98 @@
 {
-    "list_large_files": {
-        "type": "function",
-        "function": {
-            "name": "list_large_files",
-            "description": "",
-            "parameters": {
-                "properties": {
-                    "min_size_kb": {
-                        "description": "검색할 최소 파일 크기 (KB 단위)",
-                        "type": "integer"
-                    }
-                },
-                "required": [
-                    "min_size_kb"
-                ]
-            }
-        }
-    },
-    "google_news_search": {
-        "type": "function",
-        "function": {
-            "name": "google_news_search",
-            "description": "",
-            "parameters": {
-                "properties": {
-                    "language": {
-                        "description": "언어 코드 (예: en, ko)",
-                        "type": "STRING"
-                    },
-                    "query": {
-                        "description": "검색할 키워드 (예: Palestine War)",
-                        "type": "STRING"
-                    }
-                },
-                "required": [
-                    "query"
-                ]
-            }
-        }
-    },
-    "list_current_directory_files": {
-        "type": "function",
-        "function": {
-            "name": "list_current_directory_files",
-            "description": "",
-            "parameters": {}
-        }
+  "list_large_files": {
+    "type": "function",
+    "function": {
+      "name": "list_large_files",
+      "description": "",
+      "parameters": {
+        "properties": {
+          "min_size_kb": {
+            "description": "검색할 최소 파일 크기 (KB 단위)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_size_kb"
+        ]
+      }
     }
+  },
+  "google_news_search": {
+    "type": "function",
+    "function": {
+      "name": "google_news_search",
+      "description": "",
+      "parameters": {
+        "properties": {
+          "language": {
+            "description": "언어 코드 (예: en, ko)",
+            "type": "STRING"
+          },
+          "query": {
+            "description": "검색할 키워드 (예: Palestine War)",
+            "type": "STRING"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  "list_current_directory_files": {
+    "type": "function",
+    "function": {
+      "name": "list_current_directory_files",
+      "description": "",
+      "parameters": {}
+    }
+  },
+  "list_directory_and_size": {
+    "type": "function",
+    "function": {
+      "name": "list_directory_and_size",
+      "description": "현재 디렉토리의 파일 목록과 크기를 구합니다.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      }
+    }
+  },
+  "search_web": {
+    "type": "function",
+    "function": {
+      "name": "search_web",
+      "description": "웹에서 정보를 검색합니다.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      }
+    }
+  },
+  "web_search": {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "최신 웹 정보를 검색하는 도구",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      }
+    }
+  },
+  "search_location": {
+    "type": "function",
+    "function": {
+      "name": "search_location",
+      "description": "특정 지명의 위치 정보를 검색합니다.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      }
+    }
+  }
 }

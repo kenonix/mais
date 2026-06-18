@@ -1,420 +1,208 @@
+// CLI 인자 파싱 처리를 위해 clap의 Parser 트레이트를 가져옵니다.
 use clap::Parser;
-use colored::*;
-use futures_util::StreamExt;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::fs;
-use std::io::{self, Write, stdout};
-use std::path::{Path, PathBuf};
+// 표준 라이브러리 입력/출력을 위해 io 모듈을 가져옵니다.
+use std::io;
+// 20ms 논블로킹 키보드 폴링 시간 간격을 조율하기 위해 Duration 구조체를 임포트합니다.
 use std::time::Duration;
+// 비동기 비동기 네트워크 스레드 통신 중계를 위해 tokio 채널 모듈을 임포트합니다.
 use tokio::sync::mpsc;
 
-// --- 기본 AI 영혼 정의 (soul.txt 미존재 시 펴백) ---
-const DEFAULT_SOUL: &str = r#"당신의 이름은 AI입니다.
-한국어만 사용하며, 친절하고 명확하게 답변합니다.
-수학적 그래프 시각화가 필요할 경우 반드시 ```latex 수식 ``` 블록을 사용하세요."#;
+// ratatui 화면 출력을 구성할 크로스터 프레임워크 백엔드 구조체 및 터미널 캔버스 제어기를 임포트합니다.
+use ratatui::{
+    backend::CrosstermBackend,
+    Terminal,
+};
+// crossterm 터미널 환경 제어 매크로 및 마우스 캡처, 로우 모드 스위치 함수들을 임포트합니다.
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 
-/// soul.txt + tools.txt를 합산하여 하나의 시스템 프롬프트로 반환
-fn load_system_prompt() -> String {
-    // soul.txt 로드 (상위 디렉토리 → 현재 디렉토리)
-    let soul = ["../soul.txt", "soul.txt"]
-        .iter()
-        .filter_map(|p| fs::read_to_string(p).ok())
-        .find(|c| !c.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SOUL.to_string());
+// 분할 설계된 각 서브 기능 모듈들의 모듈 트리 선언부입니다.
+// 하이퍼파라미터 및 프롬프트 환경 설정을 관장하는 모듈입니다.
+mod settings;
+// NDJSON 구문 분석 및 통신 상태 이벤트를 처리하는 모듈입니다.
+mod events;
+// TUI 앱 상태 머신 및 비동기 POST 챗 요청을 관리하는 모듈입니다.
+mod app;
+// Ratatui 화면 분할 렌더링 및 UI 스타일링을 수행하는 모듈입니다.
+mod ui;
 
-    // tools.txt 로드
-    let tools = ["../tools.txt", "tools.txt"]
-        .iter()
-        .filter_map(|p| fs::read_to_string(p).ok())
-        .find(|c| !c.trim().is_empty())
-        .unwrap_or_default();
+// 로컬 설정 데이터를 읽어오기 위해 settings 모듈에서 함수를 가져옵니다.
+use settings::load_settings;
+// 통신 이벤트 포장 해독을 위해 events 모듈에서 열거형을 수입합니다.
+use events::NetworkEvent;
+// UI 컨트롤러 구조체 및 스크롤 포커스 식별자를 app 모듈에서 임포트합니다.
+use app::{TuiApp, ActivePane};
 
-    if tools.is_empty() {
-        soul.trim().to_string()
-    } else {
-        format!("{}\n\n{}", soul.trim(), tools.trim())
-    }
-}
-
-// --- CLI 인자 정의 ---
+// CLI 구동 시 터미널 인수 파라미터를 규정하는 인수 해석용 구조체 정의입니다.
 #[derive(Parser, Debug)]
 #[command(author, version, about = "LiteRT-LM Multimodal Chat Client", long_about = None)]
 struct Args {
-    /// 서버 호스트 주소
+    // LLM 추론 서버가 바인딩된 호스트 주소(Host IP)를 지정하는 인자입니다.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
-    /// 서버 포트 번호
+    // LLM 서버의 포트 번호를 가리키는 인자입니다.
     #[arg(long, default_value = "11434")]
     port: u16,
 }
 
-// --- 채팅 설정 구조체 ---
-#[derive(Clone, Serialize, Deserialize)]
-struct ChatSettings {
-    temperature: f32,
-    top_p: f32,
-    top_k: u32,
-    max_tokens: u32,
-    system_prompt: String,
-}
-
-impl Default for ChatSettings {
-    fn default() -> Self {
-        Self {
-            temperature: 0.7,
-            top_p: 0.95,
-            top_k: 40,
-            max_tokens: 2048,
-            system_prompt: load_system_prompt(),
-        }
-    }
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 설정 파일 관리 (soul.txt, tools.txt, config.json)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 설정 파일 로드 (상위 디렉토리 → 현재 디렉토리 순 탐색)
-fn load_settings() -> ChatSettings {
-    let mut settings = ChatSettings::default();
-
-    // 생성 옵션 로드
-    let config_paths = ["../config.json", "config.json"];
-    for path in &config_paths {
-        if let Ok(content) = fs::read_to_string(path) {
-            if let Ok(j) = serde_json::from_str::<Value>(&content) {
-                parse_config_json(&mut settings, &j);
-                break;
-            }
-        }
-    }
-
-    settings
-}
-
-fn parse_config_json(settings: &mut ChatSettings, j: &Value) {
-    if let Some(t) = j.get("temperature").and_then(|v| v.as_f64()) {
-        settings.temperature = t as f32;
-    }
-    if let Some(p) = j.get("top_p").and_then(|v| v.as_f64()) {
-        settings.top_p = p as f32;
-    }
-    if let Some(k) = j.get("top_k").and_then(|v| v.as_u64()) {
-        settings.top_k = k as u32;
-    }
-    if let Some(m) = j.get("max_output_tokens").and_then(|v| v.as_u64()) {
-        settings.max_tokens = m as u32;
-    }
-}
-
-fn save_settings(settings: &ChatSettings) {
-    // soul.txt만 저장 (tools.txt는 사용자가 직접 편집)
-    let _ = fs::write("soul.txt", &settings.system_prompt);
-    let config_j = json!({
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "top_k": settings.top_k,
-        "max_output_tokens": settings.max_tokens
-    });
-    if let Ok(formatted) = serde_json::to_string_pretty(&config_j) {
-        let _ = fs::write("config.json", formatted);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 입력 보조 유틸리티
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// ~ 경로를 절대 홈 경로로 확장
-fn expand_path(path_str: &str) -> String {
-    let trimmed = path_str.trim();
-    if trimmed.starts_with('~') {
-        if let Some(home) = std::env::var_os("HOME") {
-            let mut p = PathBuf::from(home);
-            if trimmed.len() > 1 {
-                p.push(&trimmed[2..]);
-            }
-            return p.to_string_lossy().to_string();
-        }
-    }
-    Path::new(trimmed).to_string_lossy().to_string()
-}
-
-/// 설정 항목 대화형 입력 도우미
-fn prompt_input(label: &str, current: &str) -> Option<String> {
-    print!("{} [{}] ❯ ", label, current);
-    let _ = stdout().flush();
-    let mut val = String::new();
-    let _ = io::stdin().read_line(&mut val);
-    let trimmed = val.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 비동기 스피너 (대기 애니메이션)
-// ─────────────────────────────────────────────────────────────────────────────
-struct Spinner {
-    stop_tx: Option<mpsc::Sender<()>>,
-}
-
-impl Spinner {
-    fn start(text: &'static str) -> Self {
-        let (tx, mut rx) = mpsc::channel(1);
-        tokio::spawn(async move {
-            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut i = 0;
-            loop {
-                tokio::select! {
-                    _ = rx.recv() => {
-                        print!("\r\x1B[K");
-                        let _ = stdout().flush();
-                        break;
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(80)) => {
-                        print!("\r{} {}", frames[i % frames.len()].cyan().bold(), text.dimmed());
-                        let _ = stdout().flush();
-                        i += 1;
-                    }
-                }
-            }
-        });
-        Self { stop_tx: Some(tx) }
-    }
-
-    fn stop(&mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.try_send(());
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 메인 클라이언트 루프
-// ─────────────────────────────────────────────────────────────────────────────
+// 비동기 런타임 진입 매크로를 선포하고 TUI 애플리케이션의 메인 루프를 시동합니다.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 터미널 인자들을 파싱하여 변수에 매핑해 줍니다.
     let args = Args::parse();
-    let client = Client::new();
+    // 타깃 접속 서버 주소를 HTTP URL 형식으로 포매팅 조립합니다.
     let server_url = format!("http://{}:{}", args.host, args.port);
 
-    // 헤더 배너 출력
-    println!("{}", "═══════════════════════════════════════════════════".blue());
-    println!("{}", "         ✨ LiteRT-LM Multimodal Chat Client ✨    ".bold().cyan());
-    println!("{}", "═══════════════════════════════════════════════════".blue());
-    println!("  • /clear        : 대화 기록 초기화");
-    println!("  • /img <경로>   : 이미지 첨부 (멀티모달)");
-    println!("  • /settings     : 파라미터 및 시스템 프롬프트 설정");
-    println!("  • /exit         : 프로그램 종료");
-    println!("{}\n", "═══════════════════════════════════════════════════".blue());
+    // 디스크에서 기존 config.json 파라미터 설정을 로드합니다.
+    let settings = load_settings();
 
-    let mut settings = load_settings();
-    let mut history: Vec<Value> = Vec::new();
-    let mut pending_image: Option<String> = None;
+    // 키보드 입력을 날것 그대로 가로채서 처리하기 위해 크로스터 로우 모드(raw mode)를 작동시킵니다.
+    enable_raw_mode()?;
+    // 표준 출력을 참조 확보합니다.
+    let mut stdout = io::stdout();
+    // 터미널 전체 화면(EnterAlternateScreen)을 교체하고 마우스 이벤트를 접수 캡처(EnableMouseCapture) 처리합니다.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // CrosstermBackend 렌더링 타깃 인스턴스를 빌드합니다.
+    let backend = CrosstermBackend::new(stdout);
+    // 라타투이 터미널 그리개 엔진을 생성 기동합니다.
+    let mut terminal = Terminal::new(backend)?;
 
+    // TuiApp 전체 상태 관리자를 메모리에 로드해 인스턴스화합니다.
+    let mut app = TuiApp::new(settings, server_url);
+    // 시작 알림 멘트를 UI 안내용 로그판에 순차 적재합니다.
+    app.tool_logs.push("✨ LiteRT-LM Multimodal TUI Client가 시작되었습니다.".to_string());
+    app.tool_logs.push("  • 명령어: /clear (기록 초기화), /img <경로> (이미지 첨부)".to_string());
+    app.tool_logs.push("  • 파라미터 명령어: /temp <값>, /top_p <값>, /max_tokens <값>, /prompt <텍스트>".to_string());
+    app.tool_logs.push("  • 종료: Esc 키 또는 /exit".to_string());
+
+    // 비동기 네트워크 스레드로부터 도착할 통신 이벤트를 수령하기 위해 tokio 채널(용량 100)을 개설합니다.
+    let (net_tx, mut net_rx) = mpsc::channel::<NetworkEvent>(100);
+
+    // 이벤트 대기 및 터미널 렌더링 무한 루프를 기동합니다.
     loop {
-        // 첨부 이미지 인디케이터
-        if let Some(ref img_path) = pending_image {
-            print!("{} ", format!("[첨부 이미지: {}]", img_path).yellow().bold());
-        }
+        // 현재 앱의 상태값(TuiApp) 정보를 라타투이 캔버스에 전달하여 전면 리페인팅을 실시합니다.
+        terminal.draw(|f| app.draw(f))?;
 
-        print!("{} ❯ ", "User".cyan().bold());
-        let _ = stdout().flush();
-
-        let mut user_input = String::new();
-        io::stdin().read_line(&mut user_input)?;
-        let user_input = user_input.trim();
-
-        // 커맨드 처리
-        match user_input {
-            "/exit" | "/quit" => {
-                println!("{}", "프로그램을 종료합니다.".red());
-                break;
-            }
-            "/clear" => {
-                history.clear();
-                pending_image = None;
-                println!("{}", "💡 대화 기록과 이미지가 초기화되었습니다.".green().bold());
-                continue;
-            }
-            "/settings" => {
-                println!("\n{}", "⚙️  현재 설정 내역".bold().yellow());
-                println!("  1. System Prompt: {}", settings.system_prompt.dimmed());
-                println!("  2. Temperature  : {}", settings.temperature);
-                println!("  3. Top-P        : {}", settings.top_p);
-                println!("  4. Top-K        : {}", settings.top_k);
-                println!("  5. Max Tokens   : {}", settings.max_tokens);
-                print!("\n설정을 변경하시겠습니까? (y/N) ❯ ");
-                let _ = stdout().flush();
-                let mut choice = String::new();
-                io::stdin().read_line(&mut choice)?;
-
-                if choice.trim().eq_ignore_ascii_case("y") {
-                    if let Some(v) = prompt_input("System Prompt", &settings.system_prompt) {
-                        settings.system_prompt = v;
-                    }
-                    if let Some(v) = prompt_input("Temperature", &settings.temperature.to_string()) {
-                        if let Ok(t) = v.parse::<f32>() { settings.temperature = t; }
-                    }
-                    if let Some(v) = prompt_input("Top-P", &settings.top_p.to_string()) {
-                        if let Ok(p) = v.parse::<f32>() { settings.top_p = p; }
-                    }
-                    if let Some(v) = prompt_input("Top-K", &settings.top_k.to_string()) {
-                        if let Ok(k) = v.parse::<u32>() { settings.top_k = k; }
-                    }
-                    if let Some(v) = prompt_input("Max Tokens", &settings.max_tokens.to_string()) {
-                        if let Ok(m) = v.parse::<u32>() { settings.max_tokens = m; }
-                    }
-                    save_settings(&settings);
-                    println!("{}", "💾 설정이 저장되었습니다.".green().bold());
-                }
-                continue;
-            }
-            cmd if cmd.starts_with("/img ") => {
-                let resolved_path = expand_path(&cmd[5..]);
-                if Path::new(&resolved_path).exists() {
-                    pending_image = Some(resolved_path.clone());
-                    println!("{} {}", "🖼 이미지 첨부 완료:".green().bold(), resolved_path.yellow());
-                } else {
-                    println!("{} {}", "❌ 파일을 찾을 수 없습니다:".red().bold(), resolved_path.red());
-                }
-                continue;
-            }
-            "" if pending_image.is_none() => continue,
-            _ => {}
-        }
-
-        // 메시지 구성 (텍스트 or 멀티모달)
-        let content_val = match pending_image.take() {
-            Some(img_path) => {
-                let mut parts = vec![json!({"type": "image", "path": img_path})];
-                if !user_input.is_empty() {
-                    parts.push(json!({"type": "text", "text": user_input}));
-                }
-                Value::Array(parts)
-            }
-            None => Value::String(user_input.to_string()),
-        };
-
-        history.push(json!({"role": "user", "content": content_val}));
-
-        // 도구 실행 루프 (재귀 호출 처리, 최대 10턴)
-        let mut loop_count = 0;
-        let mut run_chat = true;
-
-        while run_chat && loop_count < 10 {
-            loop_count += 1;
-            run_chat = false;
-
-            // 요청 메시지 어셈블리 (시스템 프롬프트 + 히스토리)
-            let mut request_messages = vec![json!({
-                "role": "system",
-                "content": settings.system_prompt
-            })];
-            request_messages.extend(history.clone());
-
-            let request_payload = json!({
-                "model": "litert-lm:latest",
-                "messages": request_messages,
-                "stream": true,
-                "options": {
-                    "temperature": settings.temperature,
-                    "top_p": settings.top_p,
-                    "top_k": settings.top_k,
-                    "max_output_tokens": settings.max_tokens
-                }
-            });
-
-            let mut spinner = Spinner::start("AI 생각 중...");
-
-            let response = match client.post(format!("{}/api/chat", server_url))
-                .json(&request_payload)
-                .send()
-                .await
-            {
-                Ok(resp) => { spinner.stop(); resp }
-                Err(e) => {
-                    spinner.stop();
-                    println!("\n{} {}", "❌ 서버 통신 오류:".red().bold(), e);
-                    break;
-                }
-            };
-
-            if !response.status().is_success() {
-                let err_text = response.text().await.unwrap_or_default();
-                println!("\n{} {}", "❌ 서버 에러 응답:".red().bold(), err_text);
-                break;
-            }
-
-            print!("{} ❯ ", "AI".magenta().bold());
-            let _ = stdout().flush();
-
-            // 스트리밍 수신 및 출력
-            let mut stream = response.bytes_stream();
-            let mut full_response_content = String::new();
-            let mut tool_calls: Option<Value> = None;
-            let mut line_buffer = String::new();
-
-            while let Some(chunk_res) = stream.next().await {
-                let chunk = match chunk_res {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        println!("\n{} {}", "❌ 스트리밍 오류:".red().bold(), e);
+        // 20ms 주기로 단기 논블로킹 키보드 이벤트 폴링(poll) 검사를 격발합니다.
+        if event::poll(Duration::from_millis(20))? {
+            // 키보드 키 입력 이벤트를 스캔해 냅니다.
+            if let Event::Key(key) = event::read()? {
+                // 특정 키조합 패턴을 해석 분기합니다.
+                match key.code {
+                    // 사용자가 Ctrl + C 키를 타격 시 비상 탈출하여 종료 분기로 이행합니다.
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // 루프 이탈
                         break;
                     }
-                };
-
-                let chunk_str_dbg = String::from_utf8_lossy(&chunk);
-                // eprintln!("[DEBUG CHUNK] {}", chunk_str_dbg);
-
-                line_buffer.push_str(&chunk_str_dbg);
-                while let Some(pos) = line_buffer.find('\n') {
-                    let line = line_buffer[..pos].trim().to_string();
-                    line_buffer.drain(..=pos);
-                    
-                    if line.is_empty() { continue; }
-                    if let Ok(j) = serde_json::from_str::<Value>(&line) {
-                        if let Some(msg) = j.get("message") {
-                            // 도구 호출 감지
-                            if let Some(calls) = msg.get("tool_calls") {
-                                if !calls.is_null() && calls.as_array().map_or(false, |a| !a.is_empty()) {
-                                    tool_calls = Some(calls.clone());
-                                }
+                    // 일반 일반 문자 키가 접수된 경우의 처리입니다.
+                    KeyCode::Char(c) => {
+                        // AI 생각 작동 중(is_loading)이 아닐 때만 입력창 버퍼에 문자를 가산 축적합니다.
+                        if !app.is_loading {
+                            // 문자 가산
+                            app.input.push(c);
+                        }
+                    }
+                    // 백스페이스 키 타격 시 글씨를 지워 줍니다.
+                    KeyCode::Backspace => {
+                        // 대기 모드 시에만 지우기 작동
+                        if !app.is_loading {
+                            // 지우기
+                            app.input.pop();
+                        }
+                    }
+                    // 엔터 키를 쳤을 때의 대화 발송 또는 셸 명령 해석 처리입니다.
+                    KeyCode::Enter => {
+                        // 로딩 대기가 아니며 타자한 입력 내용이 공백이 아닐 경우
+                        if !app.is_loading && !app.input.trim().is_empty() {
+                            // 입력 버퍼를 가로채어 임시 수거합니다.
+                            let msg = app.input.trim().to_string();
+                            // 입력판 비우기
+                            app.input.clear();
+                            // 사용자가 "/exit" 명령으로 마감을 유도 시 루프를 즉시 탈출합니다.
+                            if msg == "/exit" {
+                                break;
                             }
-                            // 텍스트 출력
-                            if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                                if !content.is_empty() {
-                                    print!("{}", content);
-                                    let _ = stdout().flush();
-                                    full_response_content.push_str(content);
-                                }
+                            // 슬래시로 시작하는 제어 지시어인 경우
+                            if msg.starts_with('/') {
+                                // 셸 변경 명령 핸들러 구동
+                                app.handle_command(&msg);
+                            } else {
+                                // 일반 질문인 경우 비동기 HTTP 채널을 실어 대화를 발송합니다.
+                                app.send_message(msg, net_tx.clone());
                             }
                         }
                     }
+                    // Esc 키를 누르면 클라이언트를 마감 종료합니다.
+                    KeyCode::Esc => {
+                        break;
+                    }
+                    // Tab 키를 누르면 방향키로 스크롤할 포커스 창(Pane)이 순환 전환됩니다.
+                    KeyCode::Tab => {
+                        // Chat -> Recursive -> Board -> Logs 순환
+                        app.active_pane = match app.active_pane {
+                            ActivePane::Chat => ActivePane::Recursive,
+                            ActivePane::Recursive => ActivePane::Board,
+                            ActivePane::Board => ActivePane::Logs,
+                            ActivePane::Logs => ActivePane::Chat,
+                        };
+                    }
+                    // 방향키 위(Up) 버튼 입력 시 스크롤 포커스가 할당된 대상 창의 스크롤 인덱스를 감산합니다.
+                    KeyCode::Up => {
+                        // 포커스 창 분기
+                        match app.active_pane {
+                            // 대화창 스크롤 조절
+                            ActivePane::Chat => { if app.chat_scroll > 0 { app.chat_scroll -= 1; } }
+                            // 에이전트 타임라인 조절
+                            ActivePane::Recursive => { if app.recursive_scroll > 0 { app.recursive_scroll -= 1; } }
+                            // 계획보드 조절
+                            ActivePane::Board => { if app.board_scroll > 0 { app.board_scroll -= 1; } }
+                            // 로그판 조절
+                            ActivePane::Logs => { if app.logs_scroll > 0 { app.logs_scroll -= 1; } }
+                        }
+                    }
+                    // 방향키 아래(Down) 버튼 입력 시 대상 활성창의 스크롤 인덱스를 증산시킵니다.
+                    KeyCode::Down => {
+                        // 스크롤 가산
+                        match app.active_pane {
+                            // 대화창 스크롤 다운
+                            ActivePane::Chat => { app.chat_scroll += 1; }
+                            // 타임라인 다운
+                            ActivePane::Recursive => { app.recursive_scroll += 1; }
+                            // 계획보드 다운
+                            ActivePane::Board => { app.board_scroll += 1; }
+                            // 로그판 다운
+                            ActivePane::Logs => { app.logs_scroll += 1; }
+                        }
+                    }
+                    // 이외 기타 조작 키 코드는 매칭을 통과 처리합니다.
+                    _ => {}
                 }
             }
-            println!();
+        }
 
-            // 히스토리에 어시스턴트 응답 추가
-            let mut assistant_message = json!({
-                "role": "assistant",
-                "content": full_response_content
-            });
-            if let Some(ref calls) = tool_calls {
-                assistant_message["tool_calls"] = calls.clone();
-            }
-            history.push(assistant_message);
-
-            // 도구 호출은 서버 측에서 처리되므로 클라이언트는 다음 턴만 대기
-            // (서버가 도구 실행 결과를 히스토리에 넣고 다음 응답을 생성함)
-            if tool_calls.is_some() {
-                run_chat = true;
-            }
+        // 비동기 소켓 채널 수령 대기를 논블로킹(try_recv) 방식으로 고속 수거하여 상태판에 연속 가산합니다.
+        while let Ok(net_ev) = net_rx.try_recv() {
+            // 입수된 이벤트 매핑 처리 구동
+            app.handle_network_event(net_ev);
         }
     }
 
+    // 터미널 환경을 기존의 날것으로 복구 회수 조치합니다.
+    // 날것의 로우 모드 오프 처리
+    disable_raw_mode()?;
+    // 대체 스크린 복귀 및 마우스 캡처 회수
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    // 커서 복조 표식 처리
+    terminal.show_cursor()?;
+
+    // 무사 종결 리포트 반환
     Ok(())
 }
